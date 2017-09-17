@@ -385,7 +385,8 @@ public class ResourceLeakDetector<T> {
             // Use the ConcurrentMap remove method, which avoids allocating an iterator.
             if (allLeaks.remove(this, LeakEntry.INSTANCE)) {
                 // Call clear so the reference is not even enqueued.
-                clear();
+                // TODO: Fix me
+                //clear();
 
                 if (head != null) {
                     synchronized (head) {
