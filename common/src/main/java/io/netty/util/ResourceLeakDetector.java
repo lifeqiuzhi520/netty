@@ -40,6 +40,7 @@ public class ResourceLeakDetector<T> {
     private static final String PROP_MAX_RECORDS = "io.netty.leakDetection.maxRecords";
     private static final int DEFAULT_MAX_RECORDS = 4;
     private static final int MAX_RECORDS;
+    private static final long MAX_RECORDS_SAMPLED;
 
     /**
      * Represents the level of resource leak detection.
@@ -108,7 +109,7 @@ public class ResourceLeakDetector<T> {
         Level level = Level.parseLevel(levelStr);
 
         MAX_RECORDS = SystemPropertyUtil.getInt(PROP_MAX_RECORDS, DEFAULT_MAX_RECORDS);
-
+        MAX_RECORDS_SAMPLED = MAX_RECORDS * 100;
         ResourceLeakDetector.level = level;
         if (logger.isDebugEnabled()) {
             logger.debug("-D{}: {}", PROP_LEVEL, level.name().toLowerCase());
@@ -336,6 +337,7 @@ public class ResourceLeakDetector<T> {
 
         private final int trackedHash;
         private int numRecords;
+        private int droppedRecords;
 
         DefaultResourceLeak(Object referent) {
             super(referent, refQueue);
@@ -363,19 +365,26 @@ public class ResourceLeakDetector<T> {
         private void record0(Object hint) {
             // Check MAX_RECORDS > 0 here to avoid similar check before remove from and add to lastRecords
             if (head != null && MAX_RECORDS > 0) {
-
-                // If already closed this will be just dropped on the floor.
-                Record record = hint == null ? new Record() : new Record(hint);
-
                 synchronized (head) {
                     if (tail == null) {
                         // already closed
                         return;
                     }
 
+                    Record record = hint == null ? new Record() : new Record(hint);
                     tail.next = record;
                     tail = record;
-                    numRecords++;
+
+                    // Enforce a limited so our linked-list not grows too large and cause a GC storm later on when we
+                    // unlink it. The reason why we choose a different limit to MAX_RECORDS is that we will not handle
+                    // duplications here as it is very expensive and only will filter these out when we actually
+                    // detected a lead.
+                    if (numRecords == MAX_RECORDS_SAMPLED) {
+                        head.next = head.next.next;
+                        droppedRecords++;
+                    } else {
+                        numRecords++;
+                    }
                 }
             }
         }
@@ -385,8 +394,7 @@ public class ResourceLeakDetector<T> {
             // Use the ConcurrentMap remove method, which avoids allocating an iterator.
             if (allLeaks.remove(this, LeakEntry.INSTANCE)) {
                 // Call clear so the reference is not even enqueued.
-                // TODO: Fix me
-                //clear();
+                clear();
 
                 if (head != null) {
                     synchronized (head) {
@@ -423,12 +431,14 @@ public class ResourceLeakDetector<T> {
             final String[] array;
             int idx = 0;
             String last = null;
+            final int dropped;
 
             synchronized (head) {
                 if (tail == null) {
                     // Already closed
                     return EMPTY_STRING;
                 }
+                dropped = droppedRecords;
                 creationRecord = head.toString();
                 array = new String[numRecords];
                 Record record = head.next;
@@ -442,12 +452,13 @@ public class ResourceLeakDetector<T> {
                 }
             }
 
-            int removedRecords = idx > MAX_RECORDS ? idx - MAX_RECORDS : 0;
+            int removed = idx > MAX_RECORDS ? idx - MAX_RECORDS : 0;
 
+            long discarded = removed + dropped;
             StringBuilder buf = new StringBuilder(16384).append(NEWLINE);
-            if (removedRecords > 0) {
+            if (discarded > 0) {
                 buf.append("WARNING: ")
-                .append(removedRecords)
+                .append(discarded)
                 .append(" leak records were discarded because the leak record count is limited to ")
                 .append(MAX_RECORDS)
                 .append(". Use system property ")
@@ -456,11 +467,11 @@ public class ResourceLeakDetector<T> {
                 .append(NEWLINE);
             }
 
-            int records = idx - removedRecords;
+            int records = idx - removed;
             buf.append("Recent access records: ").append(records).append(NEWLINE);
 
             if (records > 0) {
-                // Drop the skipped records.
+                // The array may not be completely filled so we need to take this into account.
                 for (int i = records - 1; i >= 0; i --) {
                     buf.append('#')
                        .append(i + 1)
