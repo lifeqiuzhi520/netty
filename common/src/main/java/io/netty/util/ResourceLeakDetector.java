@@ -40,7 +40,7 @@ public class ResourceLeakDetector<T> {
     private static final String PROP_MAX_RECORDS = "io.netty.leakDetection.maxRecords";
     private static final int DEFAULT_MAX_RECORDS = 4;
     private static final int MAX_RECORDS;
-    private static final long MAX_RECORDS_SAMPLED;
+    private static final int MAX_RECORDS_SAMPLED;
 
     /**
      * Represents the level of resource leak detection.
@@ -109,7 +109,8 @@ public class ResourceLeakDetector<T> {
         Level level = Level.parseLevel(levelStr);
 
         MAX_RECORDS = SystemPropertyUtil.getInt(PROP_MAX_RECORDS, DEFAULT_MAX_RECORDS);
-        MAX_RECORDS_SAMPLED = MAX_RECORDS * 100;
+        long maxRecordsSampled = MAX_RECORDS * 10L;
+        MAX_RECORDS_SAMPLED = (int) Math.min(Integer.MAX_VALUE, maxRecordsSampled);
         ResourceLeakDetector.level = level;
         if (logger.isDebugEnabled()) {
             logger.debug("-D{}: {}", PROP_LEVEL, level.name().toLowerCase());
@@ -378,7 +379,7 @@ public class ResourceLeakDetector<T> {
                     // Enforce a limited so our linked-list not grows too large and cause a GC storm later on when we
                     // unlink it. The reason why we choose a different limit to MAX_RECORDS is that we will not handle
                     // duplications here as it is very expensive and only will filter these out when we actually
-                    // detected a lead.
+                    // detected a leak.
                     if (numRecords == MAX_RECORDS_SAMPLED) {
                         head.next = head.next.next;
                         droppedRecords++;
@@ -454,7 +455,7 @@ public class ResourceLeakDetector<T> {
 
             int removed = idx > MAX_RECORDS ? idx - MAX_RECORDS : 0;
 
-            long discarded = removed + dropped;
+            long discarded = removed + (long) dropped;
             StringBuilder buf = new StringBuilder(16384).append(NEWLINE);
             if (discarded > 0) {
                 buf.append("WARNING: ")
